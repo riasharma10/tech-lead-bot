@@ -2,9 +2,20 @@ import requests
 import json
 import time
 import os
-from env_vars import GITHUB_TOKEN
 
-from collections import defaultdict
+from collections import defaultdict 
+
+from common import (
+    SYSTEM_PROMPT,
+    get_user_data_path,
+    app,
+    output_vol,
+    VOL_MOUNT_PATH,
+    base_image,
+    HOURS,
+)
+import modal
+
 
 class GitHubPRScraper:
     def __init__(self, token, owner, repo):
@@ -250,24 +261,179 @@ class GitHubPRScraper:
         return pairs, user_pairs
 
 
+# Scraping Module
+@app.function(
+    image=base_image,
+    volumes={VOL_MOUNT_PATH: output_vol},
+    timeout=2 * HOURS,
+    secrets=[modal.Secret.from_name("github-secret")]
+)
+def scrape(username: str, repo_owner: str, repo_name: str) -> int:
+    """Scrape GitHub PR comments for a user.
+    
+    Args:
+        username: GitHub username to scrape comments for
+        repo_owner: Owner of the repository
+        repo_name: Name of the repository
+        
+    Returns:
+        Number of examples collected
+    """
+    import pandas as pd
+    from tqdm import tqdm
+    
+    token = os.getenv("GITHUB_TOKEN")
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    # Fetch PRs
+    print(f"Fetching PRs for {repo_owner}/{repo_name}")
+    prs = []
+    page = 1
+    
+    while True:
+        response = requests.get(
+            f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls",
+            headers=headers,
+            params={"state": "all", "page": page, "per_page": 100}
+        )
+        
+        if response.status_code != 200:
+            print(f"Error fetching PRs: {response.status_code}")
+            break
+            
+        batch = response.json()
+        if not batch:
+            break
+            
+        prs.extend(batch)
+        print(f"Fetched page {page}, got {len(batch)} PRs")
+        
+        page += 1
+        if page > 10:  # Limit to first 1000 PRs (10 pages of 100)
+            break
+    
+    examples = []
+    
+    # Process each PR
+    for pr in tqdm(prs):
+        pr_number = pr["number"]
+        
+        # Get PR review comments
+        review_comments = []
+        page = 1
+        
+        while True:
+            response = requests.get(
+                f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/comments",
+                headers=headers,
+                params={"page": page, "per_page": 100}
+            )
+            
+            if response.status_code != 200:
+                print(f"Error fetching PR comments: {response.status_code}")
+                break
+                
+            batch = response.json()
+            if not batch:
+                break
+                
+            review_comments.extend(batch)
+            page += 1
+        
+        # Filter comments by username
+        for comment in review_comments:
+            if comment["user"]["login"] == username:
+                # Get file content and context
+                path = comment.get("path")
+                commit_id = comment.get("commit_id")
+                
+                if not path or not commit_id:
+                    continue
+                
+                # Get file content at commit
+                file_response = requests.get(
+                    f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents/{path}",
+                    headers=headers,
+                    params={"ref": commit_id}
+                )
+                
+                if file_response.status_code != 200:
+                    continue
+                    
+                content_data = file_response.json()
+                if "content" in content_data:
+                    import base64
+                    file_content = base64.b64decode(content_data["content"]).decode("utf-8")
+                    
+                    # Parse line numbers from diff hunk
+                    diff_hunk = comment.get("diff_hunk", "")
+                    start_line = comment.get("start_line", comment.get("original_line", None))
+                    end_line = comment.get("line", start_line)
+                    
+                    # If we can't get line numbers directly, parse from diff hunk
+                    if diff_hunk and (start_line is None or end_line is None):
+                        import re
+                        match = re.search(r"@@ -\d+,\d+ \+(\d+),\d+ @@", diff_hunk)
+                        if match:
+                            start_line = int(match.group(1))
+                            # Count lines in diff_hunk to estimate end_line
+                            end_line = start_line + len(diff_hunk.split("\n")) - 2  # -2 for header and slack
+                    
+                    # Set sensible defaults if still missing
+                    start_line = start_line or end_line
+                    end_line = end_line or start_line
+                    
+                    # Extract context (expand context to include more lines)
+                    lines = file_content.split("\n")
+                    context_start = max(0, int(start_line) - 10)
+                    context_end = min(len(lines), int(end_line) + 10)
+                    code_context = "\n".join(lines[context_start:context_end])
+                    
+                    # Create training example
+                    example = {
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT.replace("{USERNAME}", username)},
+                            {"role": "user", "content": f"File: {path}\n\nCode:\n```\n{code_context}\n```"},
+                            {"role": "assistant", "content": comment["body"]}
+                        ]
+                    }
+                    
+                    examples.append(example)
+    
+    # Save data
+    data_path = get_user_data_path(username, repo_owner)
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(data_path, "w") as f:
+        json.dump(examples, f, indent=2)
+    
+    output_vol.commit()
+    
+    print(f"Collected {len(examples)} examples for {username}")
+    return len(examples)
+
+
 # Example usage
-if __name__ == "__main__":
-    # Replace with your GitHub token and target repository details
-    token = GITHUB_TOKEN
-    owner = "riasharma10"
-    repo = "cis550-fitcheck"
+# if __name__ == "__main__":
+#     # Replace with your GitHub token and target repository details
+#     token = GITHUB_TOKEN
+#     owner = "riasharma10"
+#     repo = "cis550-fitcheck"
     
-    scraper = GitHubPRScraper(token, owner, repo)
+#     scraper = GitHubPRScraper(token, owner, repo)
     
-    # Option 1: Get all PRs and create pairs
-    pairs, user_pairs = scraper.save_prompt_response_pairs(output_dir="github_pr_data")
+#     # Option 1: Get all PRs and create pairs
+#     pairs, user_pairs = scraper.save_prompt_response_pairs(output_dir="github_pr_data")
     
-    # Option 2: Get specific PRs and create pairs
-    # specific_prs = scraper.get_all_prs(state="closed", max_pages=1)  # Get just the first page of closed PRs
-    # pairs, user_pairs = scraper.create_prompt_response_pairs(prs=specific_prs)
+#     # Option 2: Get specific PRs and create pairs
+#     # specific_prs = scraper.get_all_prs(state="closed", max_pages=1)  # Get just the first page of closed PRs
+#     # pairs, user_pairs = scraper.create_prompt_response_pairs(prs=specific_prs)
     
-    # Print some stats
-    print(f"Total pairs: {len(pairs)}")
-    print(f"Users with comments: {len(user_pairs)}")
-    for user, user_data in user_pairs.items():
-        print(f"  {user}: {len(user_data)} comments")
+#     # Print some stats
+#     print(f"Total pairs: {len(pairs)}")
+#     print(f"Users with comments: {len(user_pairs)}")
+#     for user, user_data in user_pairs.items():
+#         print(f"  {user}: {len(user_data)} comments")
