@@ -8,6 +8,7 @@ from collections import defaultdict
 from common import (
     SYSTEM_PROMPT,
     get_user_data_path,
+    get_user_model_path,
     app,
     output_vol,
     VOL_MOUNT_PATH,
@@ -266,23 +267,26 @@ class GitHubPRScraper:
     image=base_image,
     volumes={VOL_MOUNT_PATH: output_vol},
     timeout=2 * HOURS,
-    secrets=[modal.Secret.from_name("github-secret")]
 )
-def scrape(username: str, repo_owner: str, repo_name: str) -> int:
+def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, pr_number: int, commenter: str, token: str) -> int:
     """Scrape GitHub PR comments for a user.
     
     Args:
         username: GitHub username to scrape comments for
         repo_owner: Owner of the repository
         repo_name: Name of the repository
+        token: GitHub OAuth token for authentication
         
     Returns:
         Number of examples collected
     """
     import pandas as pd
     from tqdm import tqdm
+
+    if get_user_model_path(username, repo_name).exists() and not force_reload:
+        print(f"Data already exists for {username}/{repo_name}")
+        return 0
     
-    token = os.getenv("GITHUB_TOKEN")
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
@@ -292,6 +296,16 @@ def scrape(username: str, repo_owner: str, repo_name: str) -> int:
     print(f"Fetching PRs for {repo_owner}/{repo_name}")
     prs = []
     page = 1
+
+
+    comment_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{pr_number}/comments"
+    comment_data = {
+        "body": f"We are scraping the PRs for {username} now..."
+    }
+    
+    response = requests.post(comment_url, headers=headers, json=comment_data)
+    if response.status_code != 201:
+        print(f"Failed to post comment: {response.status_code} - {response.text}")
     
     while True:
         response = requests.get(
@@ -404,7 +418,7 @@ def scrape(username: str, repo_owner: str, repo_name: str) -> int:
                     examples.append(example)
     
     # Save data
-    data_path = get_user_data_path(username, repo_owner)
+    data_path = get_user_data_path(username, repo_name)
     data_path.parent.mkdir(parents=True, exist_ok=True)
     
     with open(data_path, "w") as f:
@@ -414,26 +428,3 @@ def scrape(username: str, repo_owner: str, repo_name: str) -> int:
     
     print(f"Collected {len(examples)} examples for {username}")
     return len(examples)
-
-
-# Example usage
-# if __name__ == "__main__":
-#     # Replace with your GitHub token and target repository details
-#     token = GITHUB_TOKEN
-#     owner = "riasharma10"
-#     repo = "cis550-fitcheck"
-    
-#     scraper = GitHubPRScraper(token, owner, repo)
-    
-#     # Option 1: Get all PRs and create pairs
-#     pairs, user_pairs = scraper.save_prompt_response_pairs(output_dir="github_pr_data")
-    
-#     # Option 2: Get specific PRs and create pairs
-#     # specific_prs = scraper.get_all_prs(state="closed", max_pages=1)  # Get just the first page of closed PRs
-#     # pairs, user_pairs = scraper.create_prompt_response_pairs(prs=specific_prs)
-    
-#     # Print some stats
-#     print(f"Total pairs: {len(pairs)}")
-#     print(f"Users with comments: {len(user_pairs)}")
-#     for user, user_data in user_pairs.items():
-#         print(f"  {user}: {len(user_data)} comments")

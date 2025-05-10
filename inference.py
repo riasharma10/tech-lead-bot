@@ -59,7 +59,8 @@ class Inference:
         code_content: str, 
         file_path: str, 
         username: str, 
-        repo_owner: Optional[str] = None
+        repo_owner: Optional[str] = None,
+        repo_name: Optional[str] = None
     ) -> AsyncIterator[str]:
         """Generate a code review comment for the given code.
         
@@ -77,7 +78,7 @@ class Inference:
             self.loras[ident] = len(self.loras) + 1
         
         output_vol.reload()
-        checkpoint_path = get_user_checkpoint_path(username, repo_owner)
+        checkpoint_path = get_user_checkpoint_path(username, repo_name)
         lora_request = LoRARequest(ident, self.loras[ident], lora_local_path=checkpoint_path)
         print(f"Using LoRA {lora_request} for {username}")
 

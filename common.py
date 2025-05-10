@@ -23,7 +23,9 @@ output_vol = modal.Volume.from_name("github-codereview-vol", create_if_missing=T
 # Images
 base_image = (
     modal.Image.debian_slim()
-    .pip_install("requests", "pandas", "tqdm")
+    .pip_install("requests", "pandas", "tqdm", "cryptography",
+        "fastapi",
+        "uvicorn")
 )
 
 training_image = (
@@ -39,17 +41,17 @@ vllm_image = modal.Image.debian_slim(python_version="3.12").pip_install(
 )
 
 # Common path functions
-def get_user_data_path(username: str, repo_owner: Optional[str] = None) -> Path:
+def get_user_data_path(username: str, repo_name: Optional[str] = None) -> Path:
     """Get path to user's training data"""
-    return VOL_MOUNT_PATH / (repo_owner or "data") / username / "data.json"
+    return VOL_MOUNT_PATH / (repo_name or "data") / username / "data.json"
 
-def get_user_model_path(username: str, repo_owner: Optional[str] = None) -> Path:
+def get_user_model_path(username: str, repo_name: Optional[str] = None) -> Path:
     """Get path to user's model directory"""
-    return VOL_MOUNT_PATH / (repo_owner or "data") / username / "model"
+    return VOL_MOUNT_PATH / (repo_name or "data") / username / "model"
 
-def get_user_checkpoint_path(username: str, repo_owner: Optional[str] = None, version: Optional[int] = None) -> Path:
+def get_user_checkpoint_path(username: str, repo_name: Optional[str] = None, version: Optional[int] = None) -> Path:
     """Get path to specific checkpoint"""
-    user_model_path = get_user_model_path(username, repo_owner)
+    user_model_path = get_user_model_path(username, repo_name)
     if version is None:
         version = find_latest_version(user_model_path)
     else:

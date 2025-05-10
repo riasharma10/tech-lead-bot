@@ -18,43 +18,65 @@ from modal import Image
 from typing import Optional
 from pathlib import Path
 
-# Training Module
+
 def download_model():
     """Download the model using torchtune."""
-    # subprocess.run(
-    #     [
-    #         "tune",
-    #         "download",
-    #         MODEL_NAME,
-    #         "--output-dir",
-    #         MODEL_PATH.as_posix(),
-    #         "--ignore-patterns",
-    #         "original/consolidated.00.pth",
-    #     ]
-    # )
-    # def download_model():
-    """Ensure the model is properly downloaded with all config files."""
+    import subprocess
     import os
-    from huggingface_hub import snapshot_download
+    import shutil
+
+    # Clean up existing model directory if it exists
+    if MODEL_PATH.exists():
+        print(f"Cleaning up existing model directory: {MODEL_PATH}")
+        shutil.rmtree(MODEL_PATH)
     
-    # Get token from environment
+    MODEL_PATH.mkdir(parents=True, exist_ok=True)
     token = os.getenv("HUGGINGFACE_TOKEN")
     
-    # Download complete model (this is more reliable than tune download)
-    snapshot_download(
-        repo_id=MODEL_NAME,
-        token=token,
-        local_dir=str(MODEL_PATH),
-        # ignore_patterns=["*.bin", "*.safetensors"],  # Only download config files for now
-    )
-    
-    print(f"Downloaded model config files to {MODEL_PATH}")
-    print(f"Files: {os.listdir(str(MODEL_PATH))}")
+    print(f"Downloading model {MODEL_NAME} to {MODEL_PATH}")
+    try:
+        subprocess.run(
+            [
+                "tune",
+                "download",
+                MODEL_NAME,
+                "--output-dir",
+                MODEL_PATH.as_posix(),
+                "--ignore-patterns",
+                "original/consolidated.00.pth",
+                "--hf-token",  # Changed from --token to --hf-token
+                token,
+            ],
+            check=True  # This will raise an exception if the command fails
+        )
+        
+        # Verify the download
+        print("\nDownloaded files:")
+        for root, dirs, files in os.walk(MODEL_PATH):
+            level = root.replace(str(MODEL_PATH), '').count(os.sep)
+            indent = ' ' * 4 * level
+            print(f"{indent}{os.path.basename(root)}/")
+            subindent = ' ' * 4 * (level + 1)
+            for f in files:
+                print(f"{subindent}{f}")
+        
+        print("\nModel download complete!")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Error downloading model: {e}")
+        raise
+    except Exception as e:
+        print(f"Unexpected error during model download: {e}")
+        raise
 
 def prepare_adapter_for_inference(base_model_path, adapter_path):
     """Copy necessary tokenizer files to make adapter work with vLLM."""
     import os
     import shutil
+
+    print(f"\nPreparing adapter for inference:")
+    print(f"Base model path: {base_model_path}")
+    print(f"Adapter path: {adapter_path}")
 
     # Check if tokenizer files already exist in adapter directory
     adapter_tokenizer_files = [f for f in os.listdir(adapter_path) 
@@ -62,13 +84,17 @@ def prepare_adapter_for_inference(base_model_path, adapter_path):
 
     if len(adapter_tokenizer_files) > 0:
         print("Tokenizer files already exist in adapter directory, skipping copy.")
+        print(f"Found files: {adapter_tokenizer_files}")
         return
+
     # No tokenizer files in adapter directory: copy from base model
     print("No tokenizer files found in adapter directory, copying from base model.")
     
     # Find tokenizer files in base model
     tokenizer_files = [f for f in os.listdir(base_model_path) 
                       if f.startswith("tokenizer") or f.startswith("special_tokens")]
+    
+    print(f"Found tokenizer files in base model: {tokenizer_files}")
     
     # Copy to adapter directory
     for file in tokenizer_files:
@@ -83,6 +109,9 @@ def prepare_adapter_for_inference(base_model_path, adapter_path):
     with open(config_path, 'r') as f:
         config = json.load(f)
     
+    print("\nCurrent adapter config:")
+    print(json.dumps(config, indent=2))
+    
     # Add missing fields if needed
     updated = False
     if "base_model_name_or_path" not in config:
@@ -93,10 +122,13 @@ def prepare_adapter_for_inference(base_model_path, adapter_path):
         updated = True
     
     if updated:
+        print("\nUpdating adapter config with missing fields...")
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
-        print("Updated adapter_config.json with missing fields")
-
+        print("Updated adapter config:")
+        print(json.dumps(config, indent=2))
+    
+    print("\nAdapter preparation complete!")
 
 @app.function(
     image=training_image,
@@ -108,7 +140,7 @@ def prepare_adapter_for_inference(base_model_path, adapter_path):
         modal.Secret.from_name("wandb-secret")
     ],
 )
-def finetune(username: str, repo_owner: str = None, recipe_args: str = None, cleanup: bool = False):
+def finetune(username: str, repo_owner: str = None, recipe_args: str = None, cleanup: bool = False, repo_name: str = None, force_reload: bool = False):
     """Fine-tune a model on the user's GitHub comment history.
     
     Args:
@@ -120,24 +152,30 @@ def finetune(username: str, repo_owner: str = None, recipe_args: str = None, cle
     import shlex
     import shutil
 
-    # if MODEL_PATH.exists():
-    #      shutil.rmtree(MODEL_PATH)
+    #  if something happens to the model, we can download it again
+    if not MODEL_PATH.exists():
+        print("Downloading model...")
+        download_model()
+        output_vol.commit()
 
-    # if get_user_model_path(username, repo_owner).exists():
-    #      shutil.rmtree(get_user_model_path(username, repo_owner))
+    data_path = get_user_data_path(username, repo_name)
+    print(f"Data path: {data_path}")
+    output_dir = get_user_model_path(username, repo_name)
+    print(f"Output dir: {output_dir}")
 
-    # print("Downloading model...")
-    # download_model()
-    # output_vol.commit()
+    if output_dir.exists() and (output_dir / "epoch_1").exists() and not force_reload:
+        print(f"Model already exists for {username}/{repo_name}, skipping fine-tuning.")
+        return
 
-    data_path = get_user_data_path(username, repo_owner)
-    output_dir = get_user_model_path(username, repo_owner)
+    print(f"Username: {username}")
+    print(f"Repo name: {repo_name}")
+    print(f"Repo owner: {repo_owner}")
+
+    if force_reload and output_dir.exists():
+        print(f"Removing existing model for {username}/{repo_name}")
+        shutil.rmtree(output_dir)
+
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if recipe_args is not None:
-        recipe_args = shlex.split(recipe_args)
-    else:
-        recipe_args = []
 
     wandb_args = [
         "metric_logger._component_=torchtune.training.metric_logging.WandBLogger",
@@ -146,30 +184,46 @@ def finetune(username: str, repo_owner: str = None, recipe_args: str = None, cle
 
     print("Starting fine-tuning...")
 
-    subprocess.run(
-        [
-            "tune",
-            "run",
-            "lora_finetune_single_device",
-            "--config",
-            REMOTE_CONFIG_PATH,
-            f"output_dir={output_dir.as_posix()}",
-            f"dataset_path={data_path.as_posix()}",
-            f"model_path={MODEL_PATH.as_posix()}",
-            *wandb_args,
-        ]
-        + recipe_args
-    )
+    try: 
+        subprocess.run(
+            [
+                "tune",
+                "run",
+                "lora_finetune_single_device",
+                "--config",
+                REMOTE_CONFIG_PATH,
+                f"output_dir={output_dir.as_posix()}",
+                f"dataset_path={data_path.as_posix()}",
+                f"model_path={MODEL_PATH.as_posix()}",
+                *wandb_args,
+            ]
+        )
 
-    print("Fine-tuning complete.")
-    print(f"Model saved to {output_dir}")
+        print("Fine-tuning complete.")
+        print(f"Model saved to {output_dir}")
 
-    prepare_adapter_for_inference(MODEL_PATH, output_dir / "epoch_1")
-    # Check if the model was saved correctly    
-    if not (output_dir / "epoch_1").exists():
-        print("Error: Model not saved correctly.")
-        return
+        # Verify the model was saved correctly
+        epoch_dir = output_dir / "epoch_1"
+        if not epoch_dir.exists():
+            raise FileNotFoundError(f"Model directory not found at {epoch_dir}")
 
-    if cleanup and username != "test":
-        # Delete scraped data after fine-tuning
+        # List contents of epoch_1 directory
+        print("\nContents of epoch_1 directory:")
+        for file in epoch_dir.iterdir():
+            print(f"- {file.name}")
+            if file.name in ["adapter_model.pt", "adapter_model.safetensors"]:
+                print(f"  Size: {file.stat().st_size} bytes")
+
+        prepare_adapter_for_inference(MODEL_PATH, (output_dir / "epoch_1"))
+        
+        # delete user data after finetuning
         os.remove(data_path)
+                
+        return {"status": "success", "model_path": str(output_dir)}
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Fine-tuning failed with error: {e}")
+        raise
+    except Exception as e:
+        print(f"Unexpected error during fine-tuning: {e}")
+        raise
