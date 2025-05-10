@@ -4,6 +4,7 @@ import time
 import os
 
 from collections import defaultdict 
+from github_actions import write_status_comment
 
 from common import (
     SYSTEM_PROMPT,
@@ -262,6 +263,7 @@ class GitHubPRScraper:
         return pairs, user_pairs
 
 
+
 # Scraping Module
 @app.function(
     image=base_image,
@@ -283,29 +285,26 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
     import pandas as pd
     from tqdm import tqdm
 
-    if get_user_model_path(username, repo_name).exists() and not force_reload:
-        print(f"Data already exists for {username}/{repo_name}")
-        return 0
-    
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
     }
+
+
+    output_dir = get_user_model_path(username, repo_name)
+    if output_dir.exists() and (output_dir / "epoch_1").exists() and not force_reload:
+        print(f"Data already exists for {username}/{repo_name}")
+        return -1
     
     # Fetch PRs
     print(f"Fetching PRs for {repo_owner}/{repo_name}")
     prs = []
     page = 1
+    num_processed_prs = 0
 
 
-    comment_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{pr_number}/comments"
-    comment_data = {
-        "body": f"We are scraping the PRs for {username} now..."
-    }
-    
-    response = requests.post(comment_url, headers=headers, json=comment_data)
-    if response.status_code != 201:
-        print(f"Failed to post comment: {response.status_code} - {response.text}")
+    scraping_message = f"We are scraping the PRs for {username} now..."
+    write_status_comment(repo_owner, repo_name, pr_number, scraping_message, token)
     
     while True:
         response = requests.get(
@@ -322,11 +321,14 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
         if not batch:
             break
             
+        if len(batch) == 0:
+            break
+        
         prs.extend(batch)
         print(f"Fetched page {page}, got {len(batch)} PRs")
         
         page += 1
-        if page > 10:  # Limit to first 1000 PRs (10 pages of 100)
+        if page > 30:  # Limit to first 3000 PRs (30 pages of 100)
             break
     
     examples = []
@@ -360,6 +362,7 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
         # Filter comments by username
         for comment in review_comments:
             if comment["user"]["login"] == username:
+                num_processed_prs += 1
                 # Get file content and context
                 path = comment.get("path")
                 commit_id = comment.get("commit_id")
@@ -416,7 +419,12 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
                     }
                     
                     examples.append(example)
-    
+
+    if len(examples) == 0:
+        no_examples_message = f"No PR comments found for {username}. Please use the bot with users that have more PRs."
+        write_status_comment(repo_owner, repo_name, pr_number, no_examples_message, token)
+        return 0
+
     # Save data
     data_path = get_user_data_path(username, repo_name)
     data_path.parent.mkdir(parents=True, exist_ok=True)

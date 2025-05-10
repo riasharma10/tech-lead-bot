@@ -8,7 +8,7 @@ MAX_HUNK_LINES = 200  # maximum lines of diff context per hunk
 TRUNCATION_NOTICE = "\n... (truncated) ...\n"
 
 
-def post_github_comment(repo_owner: str, repo_name: str, pr_number: int, comment: str, path: str, position: int, commenter: str) -> bool:
+def post_github_comment(repo_owner: str, repo_name: str, pr_number: int, comment: str, path: str, position: int, commenter: str, token: str) -> bool:
     """Post a comment to a GitHub PR.
     
     Args:
@@ -25,7 +25,6 @@ def post_github_comment(repo_owner: str, repo_name: str, pr_number: int, comment
     """
     print("getting token in post_github_comment")
 
-    token = load_token(commenter)
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
@@ -66,11 +65,12 @@ def review_and_comment(
     repo_name: str,
     pr_number: int,
     file_path: str,
-    commenter: str
+    commenter: str,
+    token: str
 ):
     """Review code and post a comment in one go."""
     # Get PR file content
-    token = load_token(commenter)
+    # token = load_token(commenter)
 
     headers = {
         "Authorization": f"token {token}",
@@ -142,9 +142,25 @@ def review_and_comment(
             comment,
             file_path,
             position,
-            commenter
+            commenter,
+            token
         )
         if success:
             print(f"Posted comment at line {position} in {file_path}")
         else:
             print(f"Failed to post comment at line {position}")
+
+
+def write_status_comment(repo_owner: str, repo_name: str, pr_number: int, comment_body: str, token: str):
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    comment_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{pr_number}/comments"
+    comment_data = {
+        "body": comment_body
+    }
+    response = requests.post(comment_url, headers=headers, json=comment_data)
+    if response.status_code != 201:
+        print(f"Failed to post comment: {response.status_code} - {response.text}")

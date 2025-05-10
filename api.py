@@ -10,7 +10,8 @@ from typing import AsyncIterator, Optional, List, Dict, Any, Tuple
 from token_db import store_token
 from token_db import load_token
 from fastapi.responses import HTMLResponse
-from github_actions import review_and_comment, post_github_comment
+from github_actions import review_and_comment, post_github_comment, write_status_comment
+from github_pr_scraper import get_user_model_path
 
 
 from common import (
@@ -28,7 +29,7 @@ import modal
 
 
 # API Endpoint
-web_image = base_image.pip_install("fastapi", "uvicorn", "cryptography.fernet")
+web_image = base_image.pip_install("fastapi", "uvicorn", "cryptography.fernet", "requests", "PyJWT")
 
 class WebhookContext:
     def __init__(self, payload: dict):
@@ -46,13 +47,19 @@ class WebhookContext:
         requested_user = self.body.split(" ")[1].strip()
         self.requested_user = requested_user if requested_user else self.commenter
 
-        force_reload = self.body.split(" ")[2].strip()
-        self.force_reload = force_reload == "--force-reload"
+        if "--force-reload" in self.body:
+            self.force_reload = True
+        else:
+            self.force_reload = False
+
+
+processed_deliveries = set()
+        
 
 @app.function(
     image=web_image,
     volumes={VOL_MOUNT_PATH: output_vol},
-    secrets=[modal.Secret.from_name("encryption-key"), modal.Secret.from_name("github-oauth"), modal.Secret.from_name("github-secret")],
+    secrets=[modal.Secret.from_name("encryption-key"), modal.Secret.from_name("github-oauth"), modal.Secret.from_name("github_app_private_key"), modal.Secret.from_name("app-id")],
 )
 @modal.asgi_app()
 def api():
@@ -61,6 +68,8 @@ def api():
     from pydantic import BaseModel
     from cryptography.fernet import Fernet
     import urllib.parse
+    import base64
+    from jwt import encode
 
     app = FastAPI(title="GitHub Code Review Bot")
     
@@ -69,6 +78,64 @@ def api():
     client_secret = os.environ["GITHUB_CLIENT_SECRET"]
     fernet = Fernet(os.environ["ENCRYPTION_KEY"])
 
+    def get_installation_token(repo_owner: str, repo_name: str):
+        # Get these from your GitHub App settings
+        app_id = os.environ["APP_ID"]
+        private_key = base64.b64decode(os.environ["GITHUB_APP_PRIVATE_KEY"]).decode()
+        
+        # Generate JWT
+        now = int(time.time())
+        payload = {
+            "iat": now,
+            "exp": now + 600,  # 10 minutes
+            "iss": app_id
+        }
+        jwt_token = encode(payload, private_key, algorithm="RS256")
+
+        headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        response = requests.get(
+            "https://api.github.com/app/installations",
+            headers=headers
+        )  
+        installations = response.json()
+
+        # Find the installation for this repository
+        for installation in installations:
+            if installation["account"]["login"] == repo_owner:
+                # Get repositories for this installation
+                installation_id = installation["id"]
+
+                token_response = requests.post(
+                    f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+                    headers=headers
+                )
+
+                installation_token = token_response.json()["token"]
+                
+                # Use the correct endpoint for getting installation repositories
+                repo_headers = {
+                    "Authorization": f"Bearer {installation_token}",
+                    "Accept": "application/vnd.github.v3+json"
+                }
+                repo_response = requests.get(
+                    f"https://api.github.com/installation/repositories",  # Changed this URL
+                    headers=repo_headers
+                )
+                
+                repos = repo_response.json().get("repositories", [])
+                if not repos:
+                    repos = repo_response.json()
+                
+                # Check if this repository is in the installation
+                for repo in repos:
+                    if repo["name"] == repo_name:
+                        return installation_token
+                
+        raise Exception(f"No installation found for {repo_owner}/{repo_name}")
+    
 
     async def authenticate_user(context: WebhookContext) -> tuple[bool, str]:
         """Authenticate user and return (is_authenticated, token_or_auth_url)"""
@@ -111,10 +178,30 @@ def api():
         url = f"https://github.com/login/oauth/authorize?{urllib.parse.urlencode(params)}"
         return False, url
 
+
     @app.post("/webhook")
     async def github_webhook(request: Request):
         """Handle GitHub webhook for PR comments"""
         # Validate webhook
+
+        print("=== WEBHOOK CALLED ===")
+        print(f"Headers: {request.headers}")
+        print(f"Time: {time.time()}")
+
+        delivery_id = request.headers.get("X-GitHub-Delivery")
+        if not delivery_id:
+            return {"status": "ignored", "reason": "no delivery ID"}
+        
+        if delivery_id in processed_deliveries:
+            print(f"Ignoring duplicate webhook delivery: {delivery_id}")
+            return {"status": "ignored", "reason": "duplicate delivery"}
+        
+        processed_deliveries.add(delivery_id)
+        
+        if len(processed_deliveries) > 100:
+            processed_deliveries.clear()
+        
+
         payload = await request.json()
         event = request.headers.get("X-GitHub-Event")
         
@@ -127,40 +214,41 @@ def api():
         if "@tech-lead-bot" not in payload.get("comment", {}).get("body", ""):
             return {"status": "ignored", "reason": "bot not mentioned"}
 
-        # Create context
         context = WebhookContext(payload)
+        installation_token = get_installation_token(context.repo_owner, context.repo_name)
+
+
         print(f"Processing webhook for {context.commenter} on PR #{context.pr_number}")
 
-        # Authenticate user
         is_authenticated, auth_result = await authenticate_user(context)
         
         print("is_authenticated: ", is_authenticated)
         print("auth_result: ", auth_result)
 
         if not is_authenticated:
-            # Return HTML that will open the auth URL in a new tab
-            # 
-            # return RedirectResponse(url=auth_result)
-            bot_token = os.environ["GITHUB_TOKEN"]  # This comes from github-secret Modal secret
-            headers = {
-                "Authorization": f"token {bot_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
+            html_content = f"""
+            <html>
+                <head>
+                    <title>GitHub Authorization</title>
+                    <script>
+                        window.open("{auth_result}", "_blank");
+                    </script>
+                </head>
+                <body>
+                    <p>Opening GitHub authorization page in a new tab...</p>
+                    <p>If the page doesn't open automatically, <a href="{auth_result}" target="_blank">click here</a>.</p>
+                </body>
+            </html>
+            """
             
-            comment_url = f"https://api.github.com/repos/{context.repo_owner}/{context.repo_name}/issues/{context.pr_number}/comments"
-            comment_data = {
-                "body": f"@{context.commenter} Please authorize the bot by clicking this link: {auth_result}"
-            }
-            
-            response = requests.post(comment_url, headers=headers, json=comment_data)
-            if response.status_code != 201:
-                print(f"Failed to post comment: {response.status_code} - {response.text}")
+            write_status_comment(context.repo_owner, context.repo_name, context.pr_number, f"@{context.commenter} Please authorize the bot by clicking this link: {auth_result}", installation_token)
                 
-            return {"status": "authentication_required", "message": "User needs to authenticate", "auth_url": auth_result}
+            return HTMLResponse(content=html_content)
  
         # User is authenticated, proceed with bot functionality
         try:
-            # Scrape comments
+            write_status_comment(context.repo_owner, context.repo_name, context.pr_number, "Thinking...", installation_token)
+
             count = scrape.remote(
                 username=context.requested_user, 
                 repo_owner=context.repo_owner, 
@@ -168,11 +256,15 @@ def api():
                 force_reload=context.force_reload, 
                 pr_number=context.pr_number, 
                 commenter=context.commenter, 
-                token=auth_result)
+                token=installation_token)
             
             print(f"Scraped {count} comments for {context.requested_user}")
 
-            # Fine-tune model
+            if count == -1:
+                write_status_comment(context.repo_owner, context.repo_name, context.pr_number, "User already exists. Skipping fine-tuning.", installation_token)
+            elif count == 0:
+                return {"status": "success", "samples": 0}
+
             finetune.remote(
                 username=context.requested_user,
                 repo_owner= context.repo_owner, 
@@ -181,31 +273,18 @@ def api():
             
             print("Finished fine-tuning")
 
-            # Process webhook functionality
             webhook_functionality(
                 repo_owner=context.repo_owner,
                 repo_name=context.repo_name,
                 pr_number=context.pr_number,
                 commenter=context.commenter,
-                requested_user=context.requested_user
+                requested_user=context.requested_user,
+                token=installation_token
             )
 
             return {"status": "success", "samples": count}
         except Exception as e:
-            token = load_token(context.commenter) # This comes from github-secret Modal secret
-            headers = {
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-
-            comment_url = f"https://api.github.com/repos/{context.repo_owner}/{context.repo_name}/issues/{context.pr_number}/comments"
-            comment_data = {
-                "body": "Something went wrong. Please try again."
-            }
-            
-            response = requests.post(comment_url, headers=headers, json=comment_data)
-            if response.status_code != 201:
-                print(f"Failed to post error notification: {response.status_code} - {response.text}")
+            write_status_comment(context.repo_owner, context.repo_name, context.pr_number, "Something went wrong. Please try again.", installation_token)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/auth/github/callback")
@@ -244,7 +323,7 @@ def api():
             # Store the token
             store_token(commenter, access_token)
             print("storing token")  
-            return {"status": "success", "message": "User authenticated"}
+            return {"status": "success", "message": "User authenticated. You may now close this tab, and return to the PR."}
 
             # await RedirectResponse(url=f"https://github.com/{repo_owner}/{repo_name}/pull/{pr_number}")
         except Exception as e:
@@ -264,6 +343,7 @@ def webhook_functionality(
     pr_number: int,
     commenter: str,
     requested_user: str,
+    token: str
 ):
     """Review code and post a comment in one go."""
     # Get PR file content
@@ -285,6 +365,6 @@ def webhook_functionality(
     for f in files:
         file_path = f.get("filename")
         print("writing a comment on this file: ", file_path)
-        review_and_comment(requested_user, repo_owner, repo_name, pr_number, file_path, commenter)
+        review_and_comment(requested_user, repo_owner, repo_name, pr_number, file_path, commenter, token)
     return {"status": "scheduled"}
     
