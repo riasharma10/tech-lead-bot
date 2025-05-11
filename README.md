@@ -56,11 +56,11 @@ And watch the bot go to work:
 4. **GitHub Integration**  
    Comments are posted directly via GitHub’s REST API to the corresponding file and line in the PR. This happens automatically within seconds of the bot being called.
 
-Want a fresh retrain? Add `--force-reload` to your comment:
+Want a fresh retrain? Add `--force-reload` to your comment. This will be useful if there have been lots of new comments since calling the bot last. 
+
 ```
 @tech-lead-bot {github-username} --force-reload
 ```
-This will be useful if there have been lots of new comments since calling the bot last. 
 ---
 
 ## ⚙️ Setup
