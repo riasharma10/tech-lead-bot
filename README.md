@@ -1,110 +1,146 @@
-# 🧠 tech-lead-bot
+# 🧠 tech-lead-code-reviewer
 
-**`tech-lead-bot`** is your automated code review assistant — trained to review pull requests just like your tech lead would. It observes your past code reviews, learns your tone and style, and generates new review comments tailored to your coding habits.
+### 🏢 For Engineers:
+Are you a software engineer who dreads code reviews from *that* tech lead — the one who leaves a million nits on every PR?  
+What if you could anticipate their feedback before they even open your diff?
 
-It is designed to help teams scale high-quality feedback, save engineers' time, and ensure consistency in code quality.
+Introducing **`tech-lead-code-reviewer`** — an automated AI assistant that mimics your tech lead’s style and tone, helping you:
+
+✅ Avoid looking clueless in reviews  
+✅ Get feedback in seconds, not hours  
+✅ Preempt nitpicks before they’re even written  
+
+### 🏢 For Teams and Enterprises:
+
+Your senior engineers shouldn't waste cycles on AI-generated code or junior PRs. Now they don’t have to.
+
+✅ Reduce time-to-merge by an entire review cycle  
+✅ Ship to production faster  
+✅ Free up engineers to focus on what matters — like meetings 😉
 
 ---
 
-## 📦 What It Does
+## 💡 What It Does
 
-When you comment on a pull request with:
+**`tech-lead-code-reviewer`** is trained on your tech lead’s actual GitHub review comments and code context. It learns their style and provides personalized reviews for every diff hunk in your PR.
+
+It’s built to scale high-quality code reviews while saving your team hours of back-and-forth.
+
+---
+
+## 📦 How to Use
+
+Once your PR is ready, comment:
 
 ```
 @tech-lead-bot {github-username}
 ```
 
-The bot springs into action:
+And watch the bot go to work:
 
-1. **GitHub Authentication**  
-   The requesting user is prompted to authenticate using GitHub OAuth, ensuring access to necessary repo data.
+1. **Data Collection**  
+   We scrape `{github-username}`’s review history in the current repository. Specifically:
+   - All review comments (`pulls/:pr/comments`) left by the user across up to 3,000 PRs
+   - For each comment: the exact file path, commit SHA, and diff hunk context
+   - We fetch the file contents at the specific commit and extract the surrounding ~20 lines of code around each comment
 
-2. **Data Collection: Personalized Training Set**  
-   We scrape the specified `{github-username}`’s PR history in the target repository. This includes:
-   - Review comments
-   - Diff hunks and file context
-   - Metadata like line numbers and commit hashes
+2. **Model Fine-Tuning**  
+   Using the extracted data, we construct prompt/response pairs:
+   - Prompt: code context + file metadata
+   - Response: actual comment the user wrote  
+   These are used to fine-tune a LoRA adapter on Meta’s LLaMA 3 8B. Each adapter is cached per (user, repo) and reused automatically. We never store your source code beyond the session.
 
-3. **Model Fine-Tuning**  
-   We fine-tune a LoRA adapter on top of Meta’s LLaMA 3 8B model using the collected examples. The adapter is stored per user and repository, allowing reuse on future PRs.
+3. **Review Generation**  
+   When invoked, we parse the PR's diff, split it into hunks, and apply your fine-tuned model to each. The model responds with a one-liner review styled like your tech lead’s past comments.
 
-4. **Automated Code Review**  
-   Each diff hunk in the active PR is passed to the model. It generates a one-line review comment in the target user’s style, with a snarky tone, and posts it inline.
+4. **GitHub Integration**  
+   Comments are posted directly via GitHub’s REST API to the corresponding file and line in the PR. This happens automatically within seconds of the bot being called.
 
-5. **GitHub Integration**  
-   The bot uses GitHub’s REST API to post review comments at the correct positions in the PR diff.
-
+Want a fresh retrain? Add `--force-reload` to your comment:
+```
+@tech-lead-bot {github-username} --force-reload
+```
+This will be useful if there have been lots of new comments since calling the bot last. 
 ---
 
-## ⚙️ Setup: How to Use
+## ⚙️ Setup
 
-To enable the bot on your GitHub repository:
+### 1. **Install the GitHub App**
+- Visit: [`https://github.com/apps/tech-lead-code-reviewer`](https://github.com/apps/tech-lead-code-reviewer)
+- Click **Install**, select the repositories you want to enable
+- Done ✅
 
-1. **Add a Webhook**
-   - Go to **Settings → Webhooks → Add webhook**
-   - **Payload URL**:  
-     `https://riassharma10--github-codereview-bot-api-dev.modal.run/webhook`
-   - **Content type**:  
-     `application/json`
-   - **Events** (select these):
-     - `Discussion comments`
-     - `Issue comments`
-     - `Pull request review comments`
+### 2. **Trigger the Bot**
 
-2. **Trigger the Bot in a Comment**
-
-In any PR, add a comment:
+Comment on a PR:
 ```
-@tech-lead-bot {username}
+@tech-lead-bot {github-username}
 ```
 
-You can force the bot to re-scrape data and re-train the model by adding the `--force-reload` flag:
+Optional: force retraining
 ```
-@tech-lead-bot {username} --force-reload
+@tech-lead-bot {github-username} --force-reload
 ```
 
 ---
 
-## 🧠 Model + Inference
+## 🧠 Model & Inference
 
-- **Model**: Meta LLaMA 3 8B Instruct
-- **Fine-tuning**: LoRA adapters using TorchTune
-- **Serving**: vLLM for low-latency inference
-- **GPU**: H100 for training, L40S for inference (on Modal)
-- **Prompting Style**: OpenAI-compatible chat format with a custom snarky `system` prompt
+| Component         | Tech                                                                 |
+|------------------|----------------------------------------------------------------------|
+| Base Model       | Meta LLaMA 3 8B Instruct                                              |
+| Tuning           | LoRA adapters with TorchTune                                          |
+| Serving          | High-throughput inference via vLLM                                   |
+| Hardware         | H100 (training), L40S (inference) on Modal infrastructure             |
+| Prompt Format    | OpenAI-style chat               |
 
-Each user has a unique adapter trained on their past PR comments. If a model already exists for a user and repository, it will be reused unless `--force-reload` is specified.
+Each user gets their own adapter — reused automatically for subsequent reviews.
 
 ---
 
-## 💾 Caching and Data Handling
+## 💾 Caching & Privacy
 
-- **Caching**  
-  All scraped PR data and trained adapters are cached in a mounted Modal volume. This avoids redundant scraping and retraining for frequent users.
+We take performance and security seriously. Here’s how we optimize for both:
 
-- **Force Reload**  
-  Use the `--force-reload` flag to override the cache. This is useful if a user has left many new PR comments since their last review.
+- **Model Caching**
+    - Each user’s LoRA adapter is cached by (GitHub username, repository) in a secure Modal volume. This allows the bot to reuse models across PRs without retraining — making subsequent reviews nearly instant.
 
-- **Security & Privacy**  
-  - OAuth tokens are encrypted using a Fernet key stored as a Modal secret.
-  - GitHub data is cached **only for the session** and is **not stored persistently**.
-  - No code or comments are retained beyond the bot's operation lifecycle.
+- **Code Context Caching**
+    - The scraped review data and file context used for fine-tuning is cached only within the session to accelerate training and prevent redundant GitHub API calls. This data is automatically discarded once the session ends unless --force-reload is used.
+
+- **Force Reload**
+
+    - Add --force-reload to a bot comment to:
+    - Re-scrape the user’s latest PR history
+    - Rebuild prompt-response pairs from scratch
+    - Retrain the adapter, overwriting the cached model
+
+- **Token Security**
+
+    - GitHub OAuth tokens are encrypted using Fernet and stored as a Modal Secret.
+    - Tokens are scoped to the authenticated user and used solely to fetch the required PR data.
+
+- **Data Privacy**
+
+    - We never persist source code, PR comments, or model outputs outside the session.
+    - No user data is written to disk, exported, or shared across users or environments.
+    - All processing happens in isolated Modal containers tied to your request.
 
 ---
 
 ## 🛠️ Tech Stack
 
-- **Infrastructure**: [Modal](https://modal.com)
-- **LLM**: [Meta LLaMA 3 8B](https://ai.meta.com/llama/)
+- **Infra**: [Modal](https://modal.com)
+- **LLM**: [LLaMA 3 8B](https://ai.meta.com/llama/)
 - **Training**: [TorchTune](https://github.com/pytorch/torchtune)
 - **Serving**: [vLLM](https://github.com/vllm-project/vllm)
-- **Authentication**: GitHub OAuth
-- **Diff Parsing**: Unified diff patch parsing + line mapping
+- **Auth**: GitHub OAuth
+- **Diff Parsing**: Custom unified diff + line mapper
 
 ---
 
 ## 📫 Contact
 
-For support or questions, contact `@riassharma10`.
+Questions? Feedback? Bugs?  
+Reach out to [`@riassharma10`](https://github.com/riassharma10)
 
-Happy reviewing!

@@ -220,30 +220,30 @@ def api():
 
         print(f"Processing webhook for {context.commenter} on PR #{context.pr_number}")
 
-        is_authenticated, auth_result = await authenticate_user(context)
+        # is_authenticated, auth_result = await authenticate_user(context)
         
-        print("is_authenticated: ", is_authenticated)
-        print("auth_result: ", auth_result)
+        # print("is_authenticated: ", is_authenticated)
+        # print("auth_result: ", auth_result)
 
-        if not is_authenticated:
-            html_content = f"""
-            <html>
-                <head>
-                    <title>GitHub Authorization</title>
-                    <script>
-                        window.open("{auth_result}", "_blank");
-                    </script>
-                </head>
-                <body>
-                    <p>Opening GitHub authorization page in a new tab...</p>
-                    <p>If the page doesn't open automatically, <a href="{auth_result}" target="_blank">click here</a>.</p>
-                </body>
-            </html>
-            """
+        # if not is_authenticated:
+        #     html_content = f"""
+        #     <html>
+        #         <head>
+        #             <title>GitHub Authorization</title>
+        #             <script>
+        #                 window.open("{auth_result}", "_blank");
+        #             </script>
+        #         </head>
+        #         <body>
+        #             <p>Opening GitHub authorization page in a new tab...</p>
+        #             <p>If the page doesn't open automatically, <a href="{auth_result}" target="_blank">click here</a>.</p>
+        #         </body>
+        #     </html>
+        #     """
             
-            write_status_comment(context.repo_owner, context.repo_name, context.pr_number, f"@{context.commenter} Please authorize the bot by clicking this link: {auth_result}", installation_token)
+        #     write_status_comment(context.repo_owner, context.repo_name, context.pr_number, f"@{context.commenter} Please authorize the bot by clicking this link: {auth_result}", installation_token)
                 
-            return HTMLResponse(content=html_content)
+        #     return HTMLResponse(content=html_content)
  
         # User is authenticated, proceed with bot functionality
         try:
@@ -347,7 +347,6 @@ def webhook_functionality(
 ):
     """Review code and post a comment in one go."""
     # Get PR file content
-    token = load_token(commenter)
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
