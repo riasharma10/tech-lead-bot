@@ -332,10 +332,11 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
             break
     
     examples = []
+    print(f"Processing {len(prs)} PRs")
     
     # Process each PR
     for pr in tqdm(prs):
-        pr_number = pr["number"]
+        pr_number_iteration = pr["number"]
         
         # Get PR review comments
         review_comments = []
@@ -343,7 +344,7 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
         
         while True:
             response = requests.get(
-                f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/comments",
+                f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number_iteration}/comments",
                 headers=headers,
                 params={"page": page, "per_page": 100}
             )
@@ -361,13 +362,16 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
         
         # Filter comments by username
         for comment in review_comments:
+            print(f"Processing comment {comment}")
             if comment["user"]["login"] == username:
+                print("found one match")
                 num_processed_prs += 1
                 # Get file content and context
                 path = comment.get("path")
                 commit_id = comment.get("commit_id")
                 
                 if not path or not commit_id:
+                    print("no path or commit id")
                     continue
                 
                 # Get file content at commit
@@ -378,10 +382,12 @@ def scrape(username: str, repo_owner: str, repo_name: str, force_reload: bool, p
                 )
                 
                 if file_response.status_code != 200:
+                    print(f"no file response. file response: {file_response}, status code: {file_response.status_code}")
                     continue
                     
                 content_data = file_response.json()
                 if "content" in content_data:
+                    print("has content")
                     import base64
                     file_content = base64.b64decode(content_data["content"]).decode("utf-8")
                     
